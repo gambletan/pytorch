@@ -2539,6 +2539,36 @@ class _TorchCompileWrapper:
             self.compiler_fn.reset()
 
 
+class _TorchCompileTorchliteWrapper:
+    compiler_name = "torchlite"
+
+    def __init__(self, mode, options, dynamic):
+        self.mode = mode
+        self.dynamic = dynamic
+        self.options = options or {}
+
+    def __eq__(self, other):
+        return (
+            isinstance(other, _TorchCompileTorchliteWrapper)
+            and self.options == other.options
+            and self.dynamic == other.dynamic
+            and self.mode == other.mode
+        )
+
+    def __call__(self, model_, inputs_):
+        from torch._torchlite.api import codegen, inference_passes, run_passes
+
+        gm = run_passes(model_, list(inputs_), pipeline=inference_passes())
+        return codegen(
+            gm,
+            example_inputs=list(inputs_),
+            inference_codegen=True,
+        )
+
+    def reset(self):
+        pass
+
+
 _InputT = _ParamSpec("_InputT")
 _RetT = _TypeVar("_RetT")
 
@@ -2549,7 +2579,7 @@ def compile(
     *,
     fullgraph: builtins.bool = False,
     dynamic: builtins.bool | None = None,
-    backend: str | _Callable = "inductor",
+    backend: str | _Callable = "torchlite",
     mode: str | None = None,
     options: dict[str, str | builtins.int | builtins.bool | _Callable] | None = None,
     disable: builtins.bool = False,
@@ -2562,7 +2592,7 @@ def compile(
     *,
     fullgraph: builtins.bool = False,
     dynamic: builtins.bool | None = None,
-    backend: str | _Callable = "inductor",
+    backend: str | _Callable = "torchlite",
     mode: str | None = None,
     options: dict[str, str | builtins.int | builtins.bool | _Callable] | None = None,
     disable: builtins.bool = False,
@@ -2574,7 +2604,7 @@ def compile(
     *,
     fullgraph: builtins.bool = False,
     dynamic: builtins.bool | None = None,
-    backend: str | _Callable = "inductor",
+    backend: str | _Callable = "torchlite",
     mode: str | None = None,
     options: dict[str, str | builtins.int | builtins.bool | _Callable] | None = None,
     disable: builtins.bool = False,
@@ -2614,7 +2644,10 @@ def compile(
         dynamic kernel upon recompile.
        backend (str or Callable): backend to be used
 
-        - "inductor" is the default backend, which is a good balance between performance and overhead
+        - "torchlite" is the default backend, a from-scratch FX graph compiler that runs
+          torchlite's inference pass pipeline and codegen on the Dynamo-captured graph
+
+        - "inductor" is the previous default backend, which is a good balance between performance and overhead
 
         - Non experimental in-tree backends can be seen with `torch._dynamo.list_backends()`
 
@@ -2747,7 +2780,9 @@ def compile(
             # torch.compile is a no-op when inside torch.export region
             return model
 
-    if backend == "inductor":
+    if backend == "torchlite":
+        backend = _TorchCompileTorchliteWrapper(mode, options, dynamic)
+    elif backend == "inductor":
         if use_aoti:
             backend = _TorchCompileAOTInductorWrapper(mode, options, dynamic)
         else:
