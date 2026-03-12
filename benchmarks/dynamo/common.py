@@ -1078,6 +1078,10 @@ def speedup_experiment(args, model_iter_fn, model, example_inputs, **kwargs):
             frozen_model_iter_fn = torchscript_jit_trace(model, example_inputs)
         elif args.aot_precompile:
             frozen_model_iter_fn = aot_precompile(model, example_inputs)
+        elif args.torchlite:
+            frozen_model_iter_fn = torchlite_compile(model, example_inputs)
+        elif args.torchlite_compiled:
+            frozen_model_iter_fn = torchlite_full_compile(model, example_inputs)
         else:
             if kwargs["hf_llm"]:
                 # If it's an llm, we want to optimize model.forward, and use
@@ -1573,6 +1577,70 @@ def torchscript_jit_trace(model, example_inputs):
         return optimized(*example_args, **example_kwargs)
 
     return opt_jit_trace
+
+
+def _torchlite_flatten_inputs(model, example_inputs):
+    """Normalize benchmark inputs for torchlite: flatten kwargs into positional args."""
+    example_args, example_kwargs = _normalize_bench_inputs(example_inputs)
+    kw_keys = tuple(example_kwargs.keys())
+    num_positional_args = len(example_args)
+    flat_example_inputs = list(example_args) + [
+        example_kwargs[k] for k in kw_keys
+    ]
+
+    def trace_target(*flat_inputs):
+        args = flat_inputs[:num_positional_args]
+        kwargs = {
+            k: flat_inputs[num_positional_args + i]
+            for i, k in enumerate(kw_keys)
+        }
+        return model(*args, **kwargs)
+
+    def make_runner(gm):
+        def opt_torchlite(_, example_inputs, collect_outputs=False):
+            run_args, run_kwargs = _normalize_bench_inputs(example_inputs)
+            flat_inputs = list(run_args) + [run_kwargs[k] for k in kw_keys]
+            return gm(*flat_inputs)
+        return opt_torchlite
+
+    return trace_target, flat_example_inputs, make_runner
+
+
+def torchlite_compile(model, example_inputs):
+    from torch._torchlite import trace
+
+    trace_target, flat_example_inputs, make_runner = _torchlite_flatten_inputs(
+        model, example_inputs
+    )
+    gm = trace(trace_target, flat_example_inputs)
+    return make_runner(gm)
+
+
+def torchlite_full_compile(model, example_inputs):
+    from torch._torchlite import trace, run_passes, inference_passes, codegen
+
+    trace_target, flat_example_inputs, make_runner = _torchlite_flatten_inputs(
+        model, example_inputs
+    )
+    gm = trace(trace_target, flat_example_inputs)
+    gm = run_passes(
+        gm,
+        flat_example_inputs,
+        pipeline=inference_passes(),
+    )
+    compiled_fn = codegen(
+        gm,
+        example_inputs=flat_example_inputs,
+        inference_codegen=True,
+    )
+
+    def opt_torchlite_compiled(_, example_inputs, collect_outputs=False):
+        run_args, run_kwargs = _normalize_bench_inputs(example_inputs)
+        kw_keys = tuple(run_kwargs.keys())
+        flat_inputs = list(run_args) + [run_kwargs[k] for k in kw_keys]
+        return compiled_fn(*flat_inputs)
+
+    return opt_torchlite_compiled
 
 
 def download_retry_decorator(download_fn):
@@ -2359,6 +2427,8 @@ class BenchmarkRunner:
                         or self.args.export_nativert
                         or self.args.torchscript_jit_trace
                         or self.args.aot_precompile
+                        or self.args.torchlite
+                        or self.args.torchlite_compiled
                     ):
                         # apply export on module directly
                         # no need for n iterations
@@ -2670,7 +2740,7 @@ class BenchmarkRunner:
             # reset dynamo
             torch._dynamo.reset()
 
-            if self.args.export_aot_inductor:
+            if self.args.export_aot_inductor or self.args.torchlite or self.args.torchlite_compiled:
                 optimized_model_iter_fn = optimize_ctx
             else:
                 optimized_model_iter_fn = optimize_ctx(self.model_iter_fn)
@@ -2855,6 +2925,8 @@ class BenchmarkRunner:
                 or self.args.export_nativert
                 or self.args.torchscript_jit_trace
                 or self.args.aot_precompile
+                or self.args.torchlite
+                or self.args.torchlite_compiled
             ):
                 optimized_model_iter_fn = optimize_ctx
             else:
@@ -3658,6 +3730,16 @@ def parse_args(args=None):
         help="Measure pass rate with TorchScript jit.trace",
     )
     group.add_argument(
+        "--torchlite",
+        action="store_true",
+        help="Measure accuracy/speedup with torchlite trace-only",
+    )
+    group.add_argument(
+        "--torchlite-compiled",
+        action="store_true",
+        help="Measure accuracy/speedup with torchlite full compile pipeline",
+    )
+    group.add_argument(
         "--xla", action="store_true", help="Compare TorchXLA to eager PyTorch"
     )
     group.add_argument(
@@ -4109,6 +4191,14 @@ def run(runner, args, original_dir=None):
         optimize_ctx = torchscript_jit_trace
         experiment = speedup_experiment
         output_filename = "torchscript_jit_trace.csv"
+    elif args.torchlite:
+        optimize_ctx = torchlite_compile
+        experiment = speedup_experiment
+        output_filename = "torchlite.csv"
+    elif args.torchlite_compiled:
+        optimize_ctx = torchlite_full_compile
+        experiment = speedup_experiment
+        output_filename = "torchlite_compiled.csv"
     elif args.xla:
         (dev,) = args.devices
         os.environ["PJRT_DEVICE"] = {"cuda": "GPU", "cpu": "CPU"}[dev]

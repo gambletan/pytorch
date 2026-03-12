@@ -403,3 +403,7 @@ CLAUDE.local.md
 /debug_*.py
 CLAUDE_CONTEXT/
 /.claude/settings.local.json
+
+# Torchlite benchmark outputs
+benchmarks/torchlite*.csv
+benchmarks/torchlite*.json
