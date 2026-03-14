@@ -3045,6 +3045,19 @@ class BuiltinVariable(VariableTracker):
             return VariableTracker.build(tx, id(args[0].value))
         elif istype(args[0], variables.FunctoolsPartialVariable):
             return VariableTracker.build(tx, id(args[0].fake_value))
+        elif isinstance(
+            args[0],
+            (
+                ConstantVariable,
+                ConstDictVariable,
+                ListVariable,
+                TupleVariable,
+                SetVariable,
+            ),
+        ):
+            from .constant import FakeIdVariable
+
+            return FakeIdVariable(id(args[0]))
         else:
             unimplemented(
                 gb_type="id() with unsupported args",
